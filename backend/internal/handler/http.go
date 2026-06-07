@@ -239,7 +239,8 @@ func (h *HTTPHandler) teacherOverview(c *gin.Context) {
 }
 
 func (h *HTTPHandler) teacherClassStats(c *gin.Context) {
-	stats, err := h.attemptSvc.ClassWrongStats()
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
+	stats, err := h.attemptSvc.ClassWrongStats(limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "load class stats failed"})
 		return

@@ -196,77 +196,72 @@ func (s *AttemptService) StudentMistakes(userID uint) ([]StudentMistake, error) 
 	return result, nil
 }
 
-func (s *AttemptService) ClassWrongStats() ([]ClassWrongStat, error) {
-	var wrongAnswers []models.AttemptAnswer
-	if err := s.db.Where("is_correct = ?", false).Find(&wrongAnswers).Error; err != nil {
-		return nil, fmt.Errorf("load wrong answers: %w", err)
+type classWrongStatRow struct {
+	ClassID    uint   `gorm:"column:class_id"`
+	ClassName  string `gorm:"column:class_name"`
+	QuestionID uint   `gorm:"column:question_id"`
+	Question   string `gorm:"column:question_title"`
+	WrongCount int64  `gorm:"column:wrong_count"`
+}
+
+func (s *AttemptService) ClassWrongStats(limit int) ([]ClassWrongStat, error) {
+	rows, err := s.queryClassWrongStats(limit)
+	if err != nil {
+		return nil, fmt.Errorf("query class wrong stats: %w", err)
 	}
-	if len(wrongAnswers) == 0 {
+	if len(rows) == 0 {
 		return []ClassWrongStat{}, nil
 	}
+	return buildClassWrongStats(rows), nil
+}
 
-	attemptIDSet := map[uint]struct{}{}
-	questionIDSet := map[uint]struct{}{}
-	for _, item := range wrongAnswers {
-		attemptIDSet[item.AttemptID] = struct{}{}
-		questionIDSet[item.QuestionID] = struct{}{}
-	}
+// queryClassWrongStats 执行班级错题热区的数据库聚合查询。
+//
+// 推荐索引（提升查询性能）：
+//   - attempt_answers(is_correct, question_id, attempt_id)  -- 覆盖过滤与分组
+//   - attempts(id, class_id)                                -- 覆盖 JOIN 键
+//   - class_rooms(id, name)                                 -- 覆盖班级名查询
+//   - questions(id, title)                                  -- 覆盖题目标题查询
+func (s *AttemptService) queryClassWrongStats(limit int) ([]classWrongStatRow, error) {
+	db := s.db.
+		Table("attempt_answers aa").
+		Select(
+			"a.class_id AS class_id, " +
+				"COALESCE(cr.name, '') AS class_name, " +
+				"aa.question_id AS question_id, " +
+				"COALESCE(q.title, '') AS question_title, " +
+				"COUNT(*) AS wrong_count",
+		).
+		Joins("JOIN attempts a ON a.id = aa.attempt_id").
+		Joins("LEFT JOIN class_rooms cr ON cr.id = a.class_id").
+		Joins("LEFT JOIN questions q ON q.id = aa.question_id").
+		Where("aa.is_correct = ?", false).
+		Group("a.class_id, aa.question_id").
+		Order("wrong_count DESC, a.class_id ASC, aa.question_id ASC")
 
-	attemptIDs := mapKeys(attemptIDSet)
-	questionIDs := mapKeys(questionIDSet)
-
-	var attempts []models.Attempt
-	if err := s.db.Preload("ClassRoom").Where("id IN ?", attemptIDs).Find(&attempts).Error; err != nil {
-		return nil, fmt.Errorf("load attempts for stats: %w", err)
-	}
-	attemptMap := map[uint]models.Attempt{}
-	for _, a := range attempts {
-		attemptMap[a.ID] = a
-	}
-
-	var questions []models.Question
-	if err := s.db.Where("id IN ?", questionIDs).Find(&questions).Error; err != nil {
-		return nil, fmt.Errorf("load questions for stats: %w", err)
-	}
-	questionMap := map[uint]models.Question{}
-	for _, q := range questions {
-		questionMap[q.ID] = q
-	}
-
-	type statKey struct {
-		classID    uint
-		questionID uint
-	}
-	counter := map[statKey]int64{}
-	for _, item := range wrongAnswers {
-		attempt, ok := attemptMap[item.AttemptID]
-		if !ok {
-			continue
-		}
-		key := statKey{classID: attempt.ClassID, questionID: item.QuestionID}
-		counter[key]++
+	if limit > 0 {
+		db = db.Limit(limit)
 	}
 
-	result := make([]ClassWrongStat, 0, len(counter))
-	for key, count := range counter {
-		attemptClass := ""
-		if at, ok := findAttemptByClass(attempts, key.classID); ok {
-			attemptClass = at.ClassRoom.Name
-		}
-		question := questionMap[key.questionID]
+	var rows []classWrongStatRow
+	if err := db.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func buildClassWrongStats(rows []classWrongStatRow) []ClassWrongStat {
+	result := make([]ClassWrongStat, 0, len(rows))
+	for _, row := range rows {
 		result = append(result, ClassWrongStat{
-			ClassID:    key.classID,
-			ClassName:  attemptClass,
-			QuestionID: key.questionID,
-			Question:   question.Title,
-			WrongCount: count,
+			ClassID:    row.ClassID,
+			ClassName:  row.ClassName,
+			QuestionID: row.QuestionID,
+			Question:   row.Question,
+			WrongCount: row.WrongCount,
 		})
 	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].WrongCount > result[j].WrongCount
-	})
-	return result, nil
+	return result
 }
 
 func (s *AttemptService) TeacherRecentAttempts(limit int) ([]RecentAttempt, error) {
@@ -319,23 +314,6 @@ func uniqueQuestionIDs(items []dto.SubmitAnswerItem) []uint {
 		ids = append(ids, id)
 	}
 	return ids
-}
-
-func mapKeys(set map[uint]struct{}) []uint {
-	keys := make([]uint, 0, len(set))
-	for id := range set {
-		keys = append(keys, id)
-	}
-	return keys
-}
-
-func findAttemptByClass(attempts []models.Attempt, classID uint) (models.Attempt, bool) {
-	for _, item := range attempts {
-		if item.ClassID == classID {
-			return item, true
-		}
-	}
-	return models.Attempt{}, false
 }
 
 func IsNotFound(err error) bool {
