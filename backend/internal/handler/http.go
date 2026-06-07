@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +16,12 @@ import (
 	"label3130/backend/internal/models"
 	"label3130/backend/internal/service"
 )
+
+type ErrorResponse struct {
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"requestId"`
+}
 
 type HTTPHandler struct {
 	authSvc     *service.AuthService
@@ -43,6 +50,7 @@ func New(
 func (h *HTTPHandler) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(middleware.RequestID())
 	r.Use(h.requestLogger())
 	r.Use(cors())
 
@@ -86,10 +94,48 @@ func (h *HTTPHandler) Router() *gin.Engine {
 	return r
 }
 
+func (h *HTTPHandler) respondError(c *gin.Context, status int, message string) {
+	rid := middleware.GetRequestID(c)
+	c.JSON(status, ErrorResponse{
+		Code:      status,
+		Message:   message,
+		RequestID: rid,
+	})
+}
+
+func (h *HTTPHandler) respondServiceError(c *gin.Context, err error) {
+	status, message := mapServiceError(err)
+	if status == http.StatusInternalServerError {
+		h.log.Error("service error",
+			"error", err.Error(),
+			"request_id", middleware.GetRequestID(c),
+		)
+	}
+	h.respondError(c, status, message)
+}
+
+func mapServiceError(err error) (int, string) {
+	switch {
+	case errors.Is(err, service.ErrUserExists):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, service.ErrInvalidCredential):
+		return http.StatusUnauthorized, err.Error()
+	case errors.Is(err, service.ErrClassNotFound),
+		errors.Is(err, service.ErrQuestionNotFound),
+		errors.Is(err, service.ErrNoQuestions):
+		return http.StatusNotFound, err.Error()
+	case errors.Is(err, service.ErrInvalidQuestion),
+		errors.Is(err, service.ErrInvalidSubmission):
+		return http.StatusBadRequest, err.Error()
+	default:
+		return http.StatusInternalServerError, "internal server error"
+	}
+}
+
 func (h *HTTPHandler) register(c *gin.Context) {
 	var req dto.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid register payload"})
+		h.respondError(c, http.StatusBadRequest, "invalid register payload")
 		return
 	}
 	result, err := h.authSvc.RegisterStudent(req)
@@ -103,7 +149,7 @@ func (h *HTTPHandler) register(c *gin.Context) {
 func (h *HTTPHandler) login(c *gin.Context) {
 	var req dto.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid login payload"})
+		h.respondError(c, http.StatusBadRequest, "invalid login payload")
 		return
 	}
 	result, err := h.authSvc.Login(req)
@@ -117,12 +163,12 @@ func (h *HTTPHandler) login(c *gin.Context) {
 func (h *HTTPHandler) me(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid token"})
+		h.respondError(c, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	user, err := h.authSvc.GetUser(claims.UserID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"message": "user not found"})
+		h.respondError(c, http.StatusNotFound, "user not found")
 		return
 	}
 	c.JSON(http.StatusOK, user)
@@ -131,7 +177,7 @@ func (h *HTTPHandler) me(c *gin.Context) {
 func (h *HTTPHandler) listClasses(c *gin.Context) {
 	classes, err := h.authSvc.ListClasses()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "failed to load classes"})
+		h.respondError(c, http.StatusInternalServerError, "failed to load classes")
 		return
 	}
 	c.JSON(http.StatusOK, classes)
@@ -140,7 +186,7 @@ func (h *HTTPHandler) listClasses(c *gin.Context) {
 func (h *HTTPHandler) listQuestions(c *gin.Context) {
 	questions, err := h.questionSvc.ListQuestions()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "failed to load questions"})
+		h.respondError(c, http.StatusInternalServerError, "failed to load questions")
 		return
 	}
 	c.JSON(http.StatusOK, questions)
@@ -149,12 +195,12 @@ func (h *HTTPHandler) listQuestions(c *gin.Context) {
 func (h *HTTPHandler) createQuestion(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid token"})
+		h.respondError(c, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	var req dto.QuestionInput
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid question payload"})
+		h.respondError(c, http.StatusBadRequest, "invalid question payload")
 		return
 	}
 	question, err := h.questionSvc.CreateQuestion(req, claims.UserID)
@@ -168,12 +214,12 @@ func (h *HTTPHandler) createQuestion(c *gin.Context) {
 func (h *HTTPHandler) updateQuestion(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid question id"})
+		h.respondError(c, http.StatusBadRequest, "invalid question id")
 		return
 	}
 	var req dto.QuestionInput
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid question payload"})
+		h.respondError(c, http.StatusBadRequest, "invalid question payload")
 		return
 	}
 	question, err := h.questionSvc.UpdateQuestion(uint(id), req)
@@ -187,7 +233,7 @@ func (h *HTTPHandler) updateQuestion(c *gin.Context) {
 func (h *HTTPHandler) deleteQuestion(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid question id"})
+		h.respondError(c, http.StatusBadRequest, "invalid question id")
 		return
 	}
 	if err := h.questionSvc.DeleteQuestion(uint(id)); err != nil {
@@ -200,30 +246,30 @@ func (h *HTTPHandler) deleteQuestion(c *gin.Context) {
 func (h *HTTPHandler) uploadQuestions(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid token"})
+		h.respondError(c, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	file, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "missing file"})
+		h.respondError(c, http.StatusBadRequest, "missing file")
 		return
 	}
 	opened, err := file.Open()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "open file failed"})
+		h.respondError(c, http.StatusBadRequest, "open file failed")
 		return
 	}
 	defer opened.Close()
 
 	data, err := io.ReadAll(opened)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "read file failed"})
+		h.respondError(c, http.StatusBadRequest, "read file failed")
 		return
 	}
 
 	count, err := h.questionSvc.UploadFromJSON(data, claims.UserID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+		h.respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "upload success", "count": count})
@@ -232,7 +278,7 @@ func (h *HTTPHandler) uploadQuestions(c *gin.Context) {
 func (h *HTTPHandler) teacherOverview(c *gin.Context) {
 	overview, err := h.attemptSvc.Overview()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "load overview failed"})
+		h.respondError(c, http.StatusInternalServerError, "load overview failed")
 		return
 	}
 	c.JSON(http.StatusOK, overview)
@@ -240,9 +286,12 @@ func (h *HTTPHandler) teacherOverview(c *gin.Context) {
 
 func (h *HTTPHandler) teacherClassStats(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
+	if limit < 0 {
+		limit = 0
+	}
 	stats, err := h.attemptSvc.ClassWrongStats(limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "load class stats failed"})
+		h.respondError(c, http.StatusInternalServerError, "load class stats failed")
 		return
 	}
 	c.JSON(http.StatusOK, stats)
@@ -250,9 +299,15 @@ func (h *HTTPHandler) teacherClassStats(c *gin.Context) {
 
 func (h *HTTPHandler) teacherAttempts(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "30"))
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
 	items, err := h.attemptSvc.TeacherRecentAttempts(limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "load attempts failed"})
+		h.respondError(c, http.StatusInternalServerError, "load attempts failed")
 		return
 	}
 	c.JSON(http.StatusOK, items)
@@ -260,6 +315,12 @@ func (h *HTTPHandler) teacherAttempts(c *gin.Context) {
 
 func (h *HTTPHandler) studentQuestions(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
 	questions, err := h.questionSvc.GetQuizQuestions(limit)
 	if err != nil {
 		h.respondServiceError(c, err)
@@ -271,13 +332,13 @@ func (h *HTTPHandler) studentQuestions(c *gin.Context) {
 func (h *HTTPHandler) submit(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok || claims.ClassID == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid student context"})
+		h.respondError(c, http.StatusUnauthorized, "invalid student context")
 		return
 	}
 
 	var req dto.SubmitRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid submit payload"})
+		h.respondError(c, http.StatusBadRequest, "invalid submit payload")
 		return
 	}
 	result, err := h.attemptSvc.Submit(claims.UserID, *claims.ClassID, req)
@@ -291,12 +352,12 @@ func (h *HTTPHandler) submit(c *gin.Context) {
 func (h *HTTPHandler) studentMistakes(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid token"})
+		h.respondError(c, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	items, err := h.attemptSvc.StudentMistakes(claims.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "load mistakes failed"})
+		h.respondError(c, http.StatusInternalServerError, "load mistakes failed")
 		return
 	}
 	c.JSON(http.StatusOK, items)
@@ -305,42 +366,29 @@ func (h *HTTPHandler) studentMistakes(c *gin.Context) {
 func (h *HTTPHandler) studentAttempts(c *gin.Context) {
 	claims, ok := middleware.GetClaims(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"message": "invalid token"})
+		h.respondError(c, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	items, err := h.attemptSvc.StudentAttempts(claims.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "load attempts failed"})
+		h.respondError(c, http.StatusInternalServerError, "load attempts failed")
 		return
 	}
 	c.JSON(http.StatusOK, items)
 }
 
-func (h *HTTPHandler) respondServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, service.ErrUserExists):
-		c.JSON(http.StatusConflict, gin.H{"message": err.Error()})
-	case errors.Is(err, service.ErrInvalidCredential):
-		c.JSON(http.StatusUnauthorized, gin.H{"message": err.Error()})
-	case errors.Is(err, service.ErrClassNotFound), errors.Is(err, service.ErrQuestionNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
-	case errors.Is(err, service.ErrInvalidQuestion), errors.Is(err, service.ErrInvalidSubmission):
-		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
-	case errors.Is(err, service.ErrNoQuestions):
-		c.JSON(http.StatusNotFound, gin.H{"message": err.Error()})
-	default:
-		h.log.Error("service error", "error", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "internal server error"})
-	}
-}
-
 func (h *HTTPHandler) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		start := time.Now()
 		c.Next()
+		duration := time.Since(start)
+		rid := middleware.GetRequestID(c)
 		h.log.Info("http",
+			"request_id", rid,
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),
+			"duration_ms", float64(duration.Microseconds())/1000.0,
 		)
 	}
 }
@@ -348,7 +396,8 @@ func (h *HTTPHandler) requestLogger() gin.HandlerFunc {
 func cors() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

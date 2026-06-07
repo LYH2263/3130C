@@ -11,7 +11,13 @@ import (
 	"label3130/backend/internal/models"
 )
 
-func Connect(dsn string) (*gorm.DB, error) {
+type PoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+func Connect(dsn string, poolCfg PoolConfig) (*gorm.DB, error) {
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: gormLogger.Default.LogMode(gormLogger.Warn),
 	})
@@ -24,15 +30,23 @@ func Connect(dsn string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("resolve sql db: %w", err)
 	}
 
-	sqlDB.SetMaxIdleConns(5)
-	sqlDB.SetMaxOpenConns(20)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	sqlDB.SetMaxIdleConns(poolCfg.MaxIdleConns)
+	sqlDB.SetMaxOpenConns(poolCfg.MaxOpenConns)
+	sqlDB.SetConnMaxLifetime(poolCfg.ConnMaxLifetime)
 
 	if err := autoMigrate(db); err != nil {
 		return nil, err
 	}
 
 	return db, nil
+}
+
+func Close(db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("resolve sql db: %w", err)
+	}
+	return sqlDB.Close()
 }
 
 func autoMigrate(db *gorm.DB) error {

@@ -11,21 +11,30 @@ import (
 
 const claimsKey = "claims"
 
+func errorResponse(c *gin.Context, status int, message string) {
+	rid := GetRequestID(c)
+	c.AbortWithStatusJSON(status, gin.H{
+		"code":      status,
+		"message":   message,
+		"requestId": rid,
+	})
+}
+
 func AuthRequired(tokens *auth.TokenManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"message": "missing authorization header"})
+			errorResponse(c, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"message": "invalid authorization header"})
+			errorResponse(c, http.StatusUnauthorized, "invalid authorization header")
 			return
 		}
 		claims, err := tokens.Parse(parts[1])
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"message": "invalid or expired token"})
+			errorResponse(c, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
 		c.Set(claimsKey, claims)
@@ -37,7 +46,7 @@ func RequireRole(role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := GetClaims(c)
 		if !ok || claims.Role != role {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"message": "forbidden"})
+			errorResponse(c, http.StatusForbidden, "forbidden")
 			return
 		}
 		c.Next()
