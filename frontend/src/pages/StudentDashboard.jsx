@@ -1,20 +1,83 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { apiRequest } from '../api/client';
+import { studentApi } from '../api';
+import { useAsync } from '../hooks/useAsync';
 import { StatCard } from '../components/StatCard';
 
 export function StudentDashboard({ user, token, onLogout }) {
-  const [loading, setLoading] = useState(true);
   const [questions, setQuestions] = useState([]);
   const [answers, setAnswers] = useState({});
   const [mistakes, setMistakes] = useState([]);
   const [attempts, setAttempts] = useState([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [loadingQuiz, setLoadingQuiz] = useState(false);
   const [lastResult, setLastResult] = useState(null);
 
   const className = user.classRoom?.name || '未分班';
+
+  const loadStudentData = useCallback(async () => {
+    const [mistakeData, attemptData] = await studentApi.loadStudentData(token);
+    setMistakes(mistakeData);
+    setAttempts(attemptData);
+  }, [token]);
+
+  const { loading, execute: fetchStudentData } = useAsync(loadStudentData, {
+    immediate: false,
+    showErrorToast: true,
+    onError: () => {
+      setMistakes([]);
+      setAttempts([]);
+    },
+  });
+
+  const { loading: loadingQuiz, execute: startQuiz } = useAsync(
+    async () => {
+      const quiz = await studentApi.getQuestions(token, 10);
+      setQuestions(quiz);
+      setAnswers({});
+      setLastResult(null);
+      toast.success('已生成新试卷，选项顺序已随机');
+    },
+    {
+      immediate: false,
+      showErrorToast: true,
+    }
+  );
+
+  const { loading: submitting, execute: submitQuiz } = useAsync(
+    async () => {
+      if (!questions.length) {
+        toast.error('请先开始答题');
+        return;
+      }
+
+      for (const question of questions) {
+        if (!answers[question.id]) {
+          toast.error(`请完成题目：${question.title.slice(0, 12)}...`);
+          return;
+        }
+      }
+
+      const answerPayload = questions.map((question) => ({
+        questionId: question.id,
+        optionId: answers[question.id],
+      }));
+      const result = await studentApi.submitQuiz(token, answerPayload);
+      setLastResult(result);
+      toast.success(`提交成功：${result.score}/${result.total}`);
+      await fetchStudentData();
+    },
+    {
+      immediate: false,
+      showErrorToast: true,
+    }
+  );
+
+  useEffect(() => {
+    if (token) {
+      fetchStudentData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
   const averageRate = useMemo(() => {
     if (!attempts.length) {
@@ -27,78 +90,6 @@ export function StudentDashboard({ user, token, onLogout }) {
     }
     return `${Math.round((totalScore / totalCount) * 100)}%`;
   }, [attempts]);
-
-  const loadStudentData = async () => {
-    setLoading(true);
-    try {
-      const [mistakeData, attemptData] = await Promise.all([
-        apiRequest('/student/mistakes', { token }),
-        apiRequest('/student/attempts', { token }),
-      ]);
-      setMistakes(mistakeData);
-      setAttempts(attemptData);
-    } catch (error) {
-      toast.error(error.message || '加载学生数据失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadStudentData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
-
-  const startQuiz = async () => {
-    try {
-      setLoadingQuiz(true);
-      const quiz = await apiRequest('/student/questions?limit=10', { token });
-      setQuestions(quiz);
-      setAnswers({});
-      setLastResult(null);
-      toast.success('已生成新试卷，选项顺序已随机');
-    } catch (error) {
-      toast.error(error.message || '拉取试卷失败');
-    } finally {
-      setLoadingQuiz(false);
-    }
-  };
-
-  const submitQuiz = async () => {
-    if (!questions.length) {
-      toast.error('请先开始答题');
-      return;
-    }
-
-    for (const question of questions) {
-      if (!answers[question.id]) {
-        toast.error(`请完成题目：${question.title.slice(0, 12)}...`);
-        return;
-      }
-    }
-
-    try {
-      setSubmitting(true);
-      const payload = {
-        answers: questions.map((question) => ({
-          questionId: question.id,
-          optionId: answers[question.id],
-        })),
-      };
-      const result = await apiRequest('/student/submit', {
-        method: 'POST',
-        token,
-        body: payload,
-      });
-      setLastResult(result);
-      toast.success(`提交成功：${result.score}/${result.total}`);
-      await loadStudentData();
-    } catch (error) {
-      toast.error(error.message || '提交失败');
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-board px-4 py-6 md:px-8 md:py-8">
@@ -138,7 +129,11 @@ export function StudentDashboard({ user, token, onLogout }) {
             <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-card">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-slate-800">在线答题</h2>
-                <button className="btn btn-sm btn-secondary" onClick={submitQuiz} disabled={submitting || !questions.length}>
+                <button
+                  className="btn btn-sm btn-secondary"
+                  onClick={submitQuiz}
+                  disabled={submitting || !questions.length}
+                >
                   {submitting ? '提交中...' : '提交本次答案'}
                 </button>
               </div>
@@ -154,7 +149,9 @@ export function StudentDashboard({ user, token, onLogout }) {
                       <p className="text-sm font-semibold text-slate-700">
                         {index + 1}. {question.title}
                       </p>
-                      {question.description ? <p className="mt-1 text-xs text-slate-500">{question.description}</p> : null}
+                      {question.description ? (
+                        <p className="mt-1 text-xs text-slate-500">{question.description}</p>
+                      ) : null}
                       <div className="mt-3 grid gap-2">
                         {question.options.map((option) => (
                           <label
@@ -238,7 +235,9 @@ export function StudentDashboard({ user, token, onLogout }) {
                     {attempts.map((item) => (
                       <tr key={item.id}>
                         <td>
-                          <span className="badge badge-info badge-outline">{item.score}/{item.total}</span>
+                          <span className="badge badge-info badge-outline">
+                            {item.score}/{item.total}
+                          </span>
                         </td>
                         <td className="text-xs text-slate-500">{new Date(item.createdAt).toLocaleString()}</td>
                       </tr>

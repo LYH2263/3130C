@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
 
-import { apiRequest } from './api/client';
+import { authApi, commonApi, setUnauthorizedHandler } from './api';
 import { AuthPage } from './pages/AuthPage';
 import { StudentDashboard } from './pages/StudentDashboard';
 import { TeacherDashboard } from './pages/TeacherDashboard';
@@ -15,9 +15,23 @@ export default function App() {
   const [initializing, setInitializing] = useState(true);
   const [authLoading, setAuthLoading] = useState(false);
 
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    setToken('');
+    setUser(null);
+    toast.success('已退出登录');
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      handleLogout();
+      toast.error('登录已过期，请重新登录');
+    });
+  }, [handleLogout]);
+
   const loadClasses = async () => {
     try {
-      const data = await apiRequest('/classes');
+      const data = await commonApi.getClasses();
       setClasses(data);
     } catch (error) {
       toast.error(error.message || '加载班级失败');
@@ -25,7 +39,7 @@ export default function App() {
   };
 
   const loadMe = async (nextToken) => {
-    const me = await apiRequest('/me', { token: nextToken });
+    const me = await commonApi.getMe(nextToken);
     setUser(me);
   };
 
@@ -65,16 +79,9 @@ export default function App() {
     }
   };
 
-  const handleLogin = (payload) => applyAuth(apiRequest('/auth/login', { method: 'POST', body: payload }));
+  const handleLogin = (payload) => applyAuth(authApi.login(payload));
 
-  const handleRegister = (payload) => applyAuth(apiRequest('/auth/register', { method: 'POST', body: payload }));
-
-  const handleLogout = () => {
-    localStorage.removeItem(TOKEN_KEY);
-    setToken('');
-    setUser(null);
-    toast.success('已退出登录');
-  };
+  const handleRegister = (payload) => applyAuth(authApi.register(payload));
 
   if (initializing) {
     return (

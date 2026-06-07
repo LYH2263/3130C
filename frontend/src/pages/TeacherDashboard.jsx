@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { apiRequest } from '../api/client';
+import { teacherApi } from '../api';
+import { useAsync } from '../hooks/useAsync';
 import { QuestionEditorModal } from '../components/QuestionEditorModal';
 import { StatCard } from '../components/StatCard';
 import { questionSchema } from '../utils/validators';
@@ -11,108 +12,104 @@ export function TeacherDashboard({ user, token, onLogout }) {
   const [questions, setQuestions] = useState([]);
   const [stats, setStats] = useState([]);
   const [attempts, setAttempts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [savingQuestion, setSavingQuestion] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState(null);
-  const [uploading, setUploading] = useState(false);
 
-  const topStats = useMemo(() => stats.slice(0, 12), [stats]);
-
-  const loadDashboard = async () => {
-    setLoading(true);
-    try {
-      const [overviewData, questionData, statData, attemptData] = await Promise.all([
-        apiRequest('/teacher/overview', { token }),
-        apiRequest('/teacher/questions', { token }),
-        apiRequest('/teacher/class-stats', { token }),
-        apiRequest('/teacher/attempts?limit=50', { token }),
-      ]);
-      setOverview(overviewData);
-      setQuestions(questionData);
-      setStats(statData);
-      setAttempts(attemptData);
-    } catch (error) {
-      toast.error(error.message || '加载教师看板失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadDashboard();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const loadDashboard = useCallback(async () => {
+    const [overviewData, questionData, statData, attemptData] = await teacherApi.loadDashboard(token);
+    setOverview(overviewData);
+    setQuestions(questionData);
+    setStats(statData);
+    setAttempts(attemptData);
   }, [token]);
 
-  const handleSaveQuestion = async (payload) => {
-    try {
+  const { loading, error, execute: fetchDashboard } = useAsync(loadDashboard, {
+    immediate: false,
+    showErrorToast: true,
+    onError: () => {
+      setOverview(null);
+      setQuestions([]);
+      setStats([]);
+      setAttempts([]);
+    },
+  });
+
+  const { loading: savingQuestion, execute: saveQuestion } = useAsync(
+    async (payload) => {
       questionSchema.parse(payload);
-      setSavingQuestion(true);
       if (editingQuestion) {
-        await apiRequest(`/teacher/questions/${editingQuestion.id}`, {
-          method: 'PUT',
-          token,
-          body: payload,
-        });
+        await teacherApi.updateQuestion(token, editingQuestion.id, payload);
         toast.success('题目已更新');
       } else {
-        await apiRequest('/teacher/questions', {
-          method: 'POST',
-          token,
-          body: payload,
-        });
+        await teacherApi.createQuestion(token, payload);
         toast.success('题目已创建');
       }
       setModalOpen(false);
       setEditingQuestion(null);
-      await loadDashboard();
-    } catch (error) {
-      toast.error(error?.issues?.[0]?.message || error.message || '保存题目失败');
-    } finally {
-      setSavingQuestion(false);
+      await fetchDashboard();
+    },
+    {
+      immediate: false,
+      showErrorToast: false,
+      onError: (err) => {
+        toast.error(err?.issues?.[0]?.message || err.message || '保存题目失败');
+      },
     }
-  };
+  );
 
-  const handleDeleteQuestion = async (questionId) => {
-    if (!window.confirm('确认删除该题目？')) {
-      return;
-    }
-    try {
-      await apiRequest(`/teacher/questions/${questionId}`, {
-        method: 'DELETE',
-        token,
-      });
+  const { loading: deleting, execute: deleteQuestion } = useAsync(
+    async (questionId) => {
+      if (!window.confirm('确认删除该题目？')) {
+        return;
+      }
+      await teacherApi.deleteQuestion(token, questionId);
       toast.success('题目已删除');
-      await loadDashboard();
-    } catch (error) {
-      toast.error(error.message || '删除失败');
+      await fetchDashboard();
+    },
+    {
+      immediate: false,
+      showErrorToast: true,
     }
+  );
+
+  const { loading: uploading, execute: uploadQuestions } = useAsync(
+    async (file) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      const data = await teacherApi.uploadQuestions(token, formData);
+      toast.success(`导入成功，新增 ${data.count || 0} 题`);
+      await fetchDashboard();
+    },
+    {
+      immediate: false,
+      showErrorToast: true,
+    }
+  );
+
+  useEffect(() => {
+    if (token) {
+      fetchDashboard();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const topStats = useMemo(() => stats.slice(0, 12), [stats]);
+
+  const handleSaveQuestion = (payload) => {
+    saveQuestion(payload);
   };
 
-  const handleUpload = async (event) => {
+  const handleDeleteQuestion = (questionId) => {
+    deleteQuestion(questionId);
+  };
+
+  const handleUpload = (event) => {
     const file = event.target.files?.[0];
     if (!file) {
       return;
     }
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      setUploading(true);
-      const data = await apiRequest('/teacher/questions/upload', {
-        method: 'POST',
-        token,
-        body: formData,
-        isForm: true,
-      });
-      toast.success(`导入成功，新增 ${data.count || 0} 题`);
-      await loadDashboard();
-    } catch (error) {
-      toast.error(error.message || '上传失败');
-    } finally {
-      setUploading(false);
-      event.target.value = '';
-    }
+    uploadQuestions(file);
+    event.target.value = '';
   };
 
   const openCreateModal = () => {
@@ -134,7 +131,7 @@ export function TeacherDashboard({ user, token, onLogout }) {
           <p className="text-sm text-slate-600">题库修改后学生机拉取即同步。</p>
         </div>
         <div className="flex gap-2">
-          <button className="btn btn-outline btn-primary" onClick={loadDashboard}>
+          <button className="btn btn-outline btn-primary" onClick={() => fetchDashboard()} disabled={loading}>
             刷新看板
           </button>
           <button className="btn btn-neutral" onClick={onLogout}>
@@ -167,7 +164,13 @@ export function TeacherDashboard({ user, token, onLogout }) {
                 <div className="flex flex-wrap gap-2">
                   <label className="btn btn-outline btn-secondary">
                     {uploading ? '上传中...' : '上传 JSON 题库'}
-                    <input type="file" className="hidden" accept="application/json" disabled={uploading} onChange={handleUpload} />
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept="application/json"
+                      disabled={uploading}
+                      onChange={handleUpload}
+                    />
                   </label>
                   <button className="btn btn-primary" onClick={openCreateModal}>
                     新增题目
@@ -196,7 +199,11 @@ export function TeacherDashboard({ user, token, onLogout }) {
                             <button className="btn btn-xs btn-ghost" onClick={() => openEditModal(question)}>
                               编辑
                             </button>
-                            <button className="btn btn-xs btn-ghost text-error" onClick={() => handleDeleteQuestion(question.id)}>
+                            <button
+                              className="btn btn-xs btn-ghost text-error"
+                              onClick={() => handleDeleteQuestion(question.id)}
+                              disabled={deleting}
+                            >
                               删除
                             </button>
                           </div>
@@ -233,7 +240,9 @@ export function TeacherDashboard({ user, token, onLogout }) {
                         <td>{item.student}</td>
                         <td>{item.className}</td>
                         <td>
-                          <span className="badge badge-outline">{item.score}/{item.total}</span>
+                          <span className="badge badge-outline">
+                            {item.score}/{item.total}
+                          </span>
                         </td>
                         <td className="text-xs text-slate-500">{item.createdAt}</td>
                       </tr>
